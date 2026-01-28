@@ -485,7 +485,11 @@ int drakvuf_plugins::start(const drakvuf_plugin_t plugin_id,
 #ifdef ENABLE_PLUGIN_TLSMON
                 case PLUGIN_TLSMON:
                 {
-                    tlsmon_config c = { .libssl_profile = options->libssl_profile };
+                    tlsmon_config c = {
+                        .boringssl_profile = options->boringssl_profile,
+                        .openssl_profile = options->openssl_profile,
+                        .openssl_libssl_path = options->openssl_libssl_path
+                    };
                     this->plugins[plugin_id] = std::make_unique<tlsmon>(this->drakvuf, &c, this->output);
                     break;
                 }

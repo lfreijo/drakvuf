@@ -72,6 +72,7 @@ namespace maple
     inline int type(uint64_t e)     { return (e >> 3) & 0xF; }
 }
 
+// BoringSSL offset indices (Android/BlissOS)
 enum ssl_offset
 {
     SSL_ST_S3 = 0,
@@ -79,11 +80,27 @@ enum ssl_offset
     __SSL_OFFSET_MAX
 };
 
-// Struct name / field name pairs for json_get_struct_members_array_rva
+// Struct name / field name pairs for BoringSSL (json_get_struct_members_array_rva)
 static const char* ssl_offset_names[][2] =
 {
     [SSL_ST_S3]                = { "ssl_st",     "s3" },
     [SSL3_STATE_CLIENT_RANDOM] = { "SSL3_STATE", "client_random" },
+};
+
+// OpenSSL 3.x offset indices (standard Linux distros)
+// OpenSSL 3.x uses ssl_connection_st instead of ssl_st
+enum openssl_offset
+{
+    OPENSSL_SSL_CONNECTION_S3 = 0,
+    OPENSSL_SSL3_STATE_CLIENT_RANDOM,
+    __OPENSSL_OFFSET_MAX
+};
+
+// Struct name / field name pairs for OpenSSL 3.x
+static const char* openssl_offset_names[][2] =
+{
+    [OPENSSL_SSL_CONNECTION_S3]           = { "ssl_connection_st", "s3" },
+    [OPENSSL_SSL3_STATE_CLIENT_RANDOM]    = { "ssl3_state_st",     "client_random" },
 };
 
 inline std::string byte2str(const unsigned char* data, size_t count)

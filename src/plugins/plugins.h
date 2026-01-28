@@ -211,7 +211,9 @@ struct plugins_options
     uint64_t hidevm_delay;              // PLUGIN_HIDEVM
     uint64_t unixsocketmon_max_size;    // PLUGIN_UNIXSOCKETMON
     bool rebootmon_abort_on_power_off;  // PLUGIN_REBOOTMON
-    const char* libssl_profile;         // PLUGIN_TLSMON (Linux)
+    const char* boringssl_profile;      // PLUGIN_TLSMON (Linux/BoringSSL)
+    const char* openssl_profile;        // PLUGIN_TLSMON (Linux/OpenSSL 3.x)
+    const char* openssl_libssl_path;    // PLUGIN_TLSMON (host libssl.so.3 for direct scan)
 };
 
 typedef enum drakvuf_plugin

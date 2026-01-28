@@ -407,8 +407,13 @@ static void print_usage()
         "\t                           Exit from execution as soon as we detect power off\n"
 #endif
 #ifdef ENABLE_PLUGIN_TLSMON
-        "\t --json-libssl <path to json>\n"
-        "\t                           The JSON profile for libssl.so (Linux/Android TLS extraction)\n"
+        "\t --json-boringssl <path to json>\n"
+        "\t                           The JSON profile for libssl.so (Linux/Android BoringSSL TLS extraction)\n"
+        "\t --json-openssl <path to json>\n"
+        "\t                           The JSON profile for libssl.so.3 (Linux OpenSSL 3.x TLS extraction)\n"
+        "\t --openssl-libssl <path to libssl.so.3>\n"
+        "\t                           Host path to libssl.so.3 for direct physical memory scan\n"
+        "\t                           (enables hook setup even when no process has libssl loaded)\n"
 #endif
         "\t --libdrakvuf-not-get-userid\n"
         "\t                           Don't collect user id in get process data\n"
@@ -550,7 +555,9 @@ int main(int argc, char** argv)
         opt_exit_injection_thread,
         opt_unixsocketmon_max_size,
         opt_rebootmon_abort_on_power_off,
-        opt_json_libssl,
+        opt_json_boringssl,
+        opt_json_openssl,
+        opt_openssl_libssl,
     };
     const option long_opts[] =
     {
@@ -640,7 +647,9 @@ int main(int argc, char** argv)
         {"exit-injection-thread", no_argument, NULL, opt_exit_injection_thread},
         {"unixsocketmon-max-size-print", required_argument, NULL, opt_unixsocketmon_max_size},
         {"rebootmon-abort-on-power-off", no_argument, NULL, opt_rebootmon_abort_on_power_off},
-        {"json-libssl", required_argument, NULL, opt_json_libssl},
+        {"json-boringssl", required_argument, NULL, opt_json_boringssl},
+        {"json-openssl", required_argument, NULL, opt_json_openssl},
+        {"openssl-libssl", required_argument, NULL, opt_openssl_libssl},
         {NULL, 0, NULL, 0}
     };
     const char* opts = "r:d:i:I:e:m:t:D:o:vx:a:f:spT:S:q:Mc:nblgj:k:w:W:hFC";
@@ -1056,8 +1065,14 @@ int main(int argc, char** argv)
                 break;
 #endif
 #ifdef ENABLE_PLUGIN_TLSMON
-            case opt_json_libssl:
-                options.libssl_profile = optarg;
+            case opt_json_boringssl:
+                options.boringssl_profile = optarg;
+                break;
+            case opt_json_openssl:
+                options.openssl_profile = optarg;
+                break;
+            case opt_openssl_libssl:
+                options.openssl_libssl_path = optarg;
                 break;
 #endif
             case 'h':
