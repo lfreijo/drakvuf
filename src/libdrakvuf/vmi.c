@@ -645,6 +645,15 @@ static event_response_t _int3_cb(drakvuf_t drakvuf, vmi_event_t* event)
         event->interrupt_event.gla, event->interrupt_event.insn_length);
 #endif
 
+    /* Diagnostic: always log INT3 PA details for debugging libssl hooks */
+    PRINT_DEBUG("[INT3-DIAG] gfn=0x%" PRIx64 " offset=0x%" PRIx64 " insn_len=%u → PA=0x%" PRIx64 " GLA=0x%" PRIx64 " lookup=%s\n",
+        (addr_t)event->interrupt_event.gfn,
+        (addr_t)event->interrupt_event.offset,
+        event->interrupt_event.insn_length,
+        pa,
+        event->interrupt_event.gla,
+        g_hash_table_lookup(drakvuf->breakpoint_lookup_pa, GSIZE_TO_POINTER(pa)) ? "HIT" : "MISS");
+
     struct wrapper* s = (struct wrapper*)g_hash_table_lookup(drakvuf->breakpoint_lookup_pa,
             GSIZE_TO_POINTER(pa));
     if (!s)

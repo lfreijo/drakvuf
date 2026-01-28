@@ -406,6 +406,10 @@ static void print_usage()
         "\t --rebootmon-abort-on-power-off\n"
         "\t                           Exit from execution as soon as we detect power off\n"
 #endif
+#ifdef ENABLE_PLUGIN_TLSMON
+        "\t --json-libssl <path to json>\n"
+        "\t                           The JSON profile for libssl.so (Linux/Android TLS extraction)\n"
+#endif
         "\t --libdrakvuf-not-get-userid\n"
         "\t                           Don't collect user id in get process data\n"
         "\t -h, --help                Show this help\n"
@@ -546,6 +550,7 @@ int main(int argc, char** argv)
         opt_exit_injection_thread,
         opt_unixsocketmon_max_size,
         opt_rebootmon_abort_on_power_off,
+        opt_json_libssl,
     };
     const option long_opts[] =
     {
@@ -635,6 +640,7 @@ int main(int argc, char** argv)
         {"exit-injection-thread", no_argument, NULL, opt_exit_injection_thread},
         {"unixsocketmon-max-size-print", required_argument, NULL, opt_unixsocketmon_max_size},
         {"rebootmon-abort-on-power-off", no_argument, NULL, opt_rebootmon_abort_on_power_off},
+        {"json-libssl", required_argument, NULL, opt_json_libssl},
         {NULL, 0, NULL, 0}
     };
     const char* opts = "r:d:i:I:e:m:t:D:o:vx:a:f:spT:S:q:Mc:nblgj:k:w:W:hFC";
@@ -1049,6 +1055,11 @@ int main(int argc, char** argv)
                 options.rebootmon_abort_on_power_off = true;
                 break;
 #endif
+#ifdef ENABLE_PLUGIN_TLSMON
+            case opt_json_libssl:
+                options.libssl_profile = optarg;
+                break;
+#endif
             case 'h':
                 print_usage();
                 return drakvuf_exit_code_t::SUCCESS;
@@ -1149,6 +1160,16 @@ int main(int argc, char** argv)
         clear_interrupt();
     }
 
+    PRINT_DEBUG("Enabling context based interception.\n");
+
+    if (context_based_interception)
+        drakvuf->toggle_context_interception(context_processes);
+
+    PRINT_DEBUG("Starting plugins\n");
+
+    if (drakvuf->start_plugins(plugin_list, &options) < 0)
+        return drakvuf_exit_code_t::FAIL;
+
     vmi_pid_t injected_pid = 0;
     if (injection_cmd)
     {
@@ -1170,16 +1191,15 @@ int main(int argc, char** argv)
         switch (ret)
         {
             case INJECTOR_FAILED_WITH_ERROR_CODE:
-                return drakvuf_exit_code_t::INJECTION_UNSUCCESSFUL;
             case INJECTOR_FAILED:
-                return drakvuf_exit_code_t::INJECTION_ERROR;
+            case INJECTOR_TIMEOUTED:
+                fprintf(stderr, "Injection failed (status=%d), continuing to monitoring loop\n", ret);
+                break;
             case INJECTOR_SUCCEEDED:
                 break;
-            case INJECTOR_TIMEOUTED:
-                return drakvuf_exit_code_t::INJECTION_TIMEOUT;
         }
 
-        if (exit_injection_thread)
+        if (ret == INJECTOR_SUCCEEDED && exit_injection_thread)
             drakvuf->exit_thread(injection_pid, injection_thread);
 
         if (is_interrupted)
@@ -1188,16 +1208,6 @@ int main(int argc, char** argv)
     }
     if (procdump_on_finish)
         options.procdump_on_finish = injected_pid;
-
-    PRINT_DEBUG("Enabling context based interception.\n");
-
-    if (context_based_interception)
-        drakvuf->toggle_context_interception(context_processes);
-
-    PRINT_DEBUG("Starting plugins\n");
-
-    if (drakvuf->start_plugins(plugin_list, &options) < 0)
-        return drakvuf_exit_code_t::FAIL;
 
     PRINT_DEBUG("Beginning DRAKVUF main loop\n");
 

@@ -110,26 +110,29 @@
  * into wireshark and automatically decrypted.
  *
  * Currently supported:
- * - extracting secrets from communication based on Schannel.
+ * - extracting secrets from communication based on Schannel (Windows).
+ * - extracting secrets from BoringSSL/OpenSSL ssl_log_secret (Linux/Android).
  */
 
 #ifndef TLSMON_H
 #define TLSMON_H
 
-#include <vector>
+#include <memory>
 
-#include <libusermode/userhook.hpp>
 #include "plugins/plugins_ex.h"
 
+class win_tlsmon;
+class linux_tlsmon;
+struct tlsmon_config;
 
 class tlsmon: public pluginex
 {
 public:
-    tlsmon(drakvuf_t drakvuf, output_format_t output);
-    ~tlsmon();
+    std::unique_ptr<win_tlsmon> wt;
+    std::unique_ptr<linux_tlsmon> lt;
 
-private:
-    void hook_lsass(drakvuf_t drakvuf);
+    tlsmon(drakvuf_t drakvuf, const tlsmon_config* config, output_format_t output);
+    ~tlsmon();
 };
 
 

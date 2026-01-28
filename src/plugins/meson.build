@@ -306,6 +306,8 @@ endif
 
 if get_option('plugin-tlsmon')
     plugin_sources += 'tlsmon/tlsmon.cpp'
+    plugin_sources += 'tlsmon/win.cpp'
+    plugin_sources += 'tlsmon/linux.cpp'
     config_h.set('ENABLE_PLUGIN_TLSMON', 1)
 endif
 

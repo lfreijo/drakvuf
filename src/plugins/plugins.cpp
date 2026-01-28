@@ -132,6 +132,7 @@
 #include "procdump2/procdump2.h"
 #include "rpcmon/rpcmon.h"
 #include "tlsmon/tlsmon.h"
+#include "tlsmon/linux.h"
 #include "codemon/codemon.h"
 #include "libhooktest/libhooktest.h"
 #include "libusermode/userhook.hpp"
@@ -484,7 +485,8 @@ int drakvuf_plugins::start(const drakvuf_plugin_t plugin_id,
 #ifdef ENABLE_PLUGIN_TLSMON
                 case PLUGIN_TLSMON:
                 {
-                    this->plugins[plugin_id] = std::make_unique<tlsmon>(this->drakvuf, this->output);
+                    tlsmon_config c = { .libssl_profile = options->libssl_profile };
+                    this->plugins[plugin_id] = std::make_unique<tlsmon>(this->drakvuf, &c, this->output);
                     break;
                 }
 #endif
