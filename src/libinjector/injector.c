@@ -154,6 +154,7 @@ injector_status_t injector_start_app(
                 method,
                 format,
                 binary_path,
+                global_search,
                 args_count,
                 args,
                 injected_pid);
