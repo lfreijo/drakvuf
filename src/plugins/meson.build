@@ -161,6 +161,8 @@ endif
 
 if get_option('plugin-memdump')
     plugin_sources += 'memdump/memdump.cpp'
+    plugin_sources += 'memdump/win.cpp'
+    plugin_sources += 'memdump/linux.cpp'
     plugin_sources += 'memdump/stack_util.cpp'
     plugin_sources += 'memdump/userhook.cpp'
 
