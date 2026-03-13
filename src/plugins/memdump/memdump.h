@@ -128,17 +128,24 @@ struct memdump_config
     const bool memdump_disable_shellcode_detect;
 };
 
+// Forward declarations for OS-specific implementations
+class win_memdump;
+class linux_memdump;
+
 class memdump: public pluginex
 {
 public:
+    // OS-specific implementations
+    std::unique_ptr<win_memdump> wm;
+    std::unique_ptr<linux_memdump> lm;
+
+    // Shared state
     int dumps_count;
-    // for memdump.cpp
     const char* memdump_dir;
+
+    // Windows-specific (kept for backward compatibility with stack_util.cpp)
     addr_t dll_base_rva;
     addr_t dll_base_wow_rva;
-    size_t kthread_process_rva;
-    size_t wow64context_eip_rva;
-    size_t wow64context_eax_rva;
 
     wanted_hooks_t wanted_hooks;
 
@@ -153,7 +160,6 @@ public:
     void userhook_destroy();
     bool userhooks_stop();
 
-private:
     void setup_dotnet_hooks(const char* dll_name, const char* profile);
 };
 

@@ -727,7 +727,7 @@ hidevm::hidevm(drakvuf_t drakvuf, const hidevm_config* config, output_format_t o
         {
             // Get TickCountMultiplier
             uint32_t multiplier = 0, ticks = 0;
-            if (VMI_SUCCESS != vmi_read_32_pa(vmi, pkuser + 0x04,  &multiplier) ||
+            if (VMI_SUCCESS != vmi_read_32_pa(vmi, pkuser + 0x04, &multiplier) ||
                 VMI_SUCCESS != vmi_read_32_pa(vmi, pkuser + 0x320, &ticks))
             {
                 PRINT_DEBUG("[HIDEVM] Failed to read KUSER_SHARED_DATA\n");
