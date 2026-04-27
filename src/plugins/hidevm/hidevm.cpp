@@ -751,9 +751,9 @@ static char* hidevm_get_key_path_from_attr(drakvuf_t drakvuf, drakvuf_trap_info_
     }
 
     char* key_path = g_strdup_printf("%s%s%s",
-        key_root_p ?: "",
-        key_root_p ? "\\" : "",
-        (const char*)us->contents ?: "");
+            key_root_p ?: "",
+            key_root_p ? "\\" : "",
+            (const char*)us->contents ?: "");
     g_free(key_root_p);
     vmi_free_unicode_str(us);
 
@@ -800,7 +800,7 @@ static event_response_t hidevm_open_key_entry(hidevm* plugin, drakvuf_t drakvuf,
         return VMI_EVENT_RESPONSE_NONE;
 
     char* key_path = hidevm_get_key_path_from_attr(drakvuf, info, objattr,
-        plugin->objattr_root, plugin->objattr_name);
+            plugin->objattr_root, plugin->objattr_name);
     if (!key_path)
         return VMI_EVENT_RESPONSE_NONE;
 
@@ -828,29 +828,29 @@ static event_response_t hidevm_open_key_entry(hidevm* plugin, drakvuf_t drakvuf,
     return VMI_EVENT_RESPONSE_NONE;
 }
 
-event_response_t hidevm::NtOpenKey_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
+event_response_t hidevm::NtOpenKey_cb(drakvuf_t, drakvuf_trap_info_t* info)
 {
-    return hidevm_open_key_entry(this, drakvuf, info);
+    return hidevm_open_key_entry(this, this->drakvuf, info);
 }
 
-event_response_t hidevm::NtOpenKeyEx_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
+event_response_t hidevm::NtOpenKeyEx_cb(drakvuf_t, drakvuf_trap_info_t* info)
 {
-    return hidevm_open_key_entry(this, drakvuf, info);
+    return hidevm_open_key_entry(this, this->drakvuf, info);
 }
 
-event_response_t hidevm::NtCreateKey_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
+event_response_t hidevm::NtCreateKey_cb(drakvuf_t, drakvuf_trap_info_t* info)
 {
-    return hidevm_open_key_entry(this, drakvuf, info);
+    return hidevm_open_key_entry(this, this->drakvuf, info);
 }
 
-event_response_t hidevm::NtOpenKeyTransacted_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
+event_response_t hidevm::NtOpenKeyTransacted_cb(drakvuf_t, drakvuf_trap_info_t* info)
 {
-    return hidevm_open_key_entry(this, drakvuf, info);
+    return hidevm_open_key_entry(this, this->drakvuf, info);
 }
 
-event_response_t hidevm::NtOpenKeyTransactedEx_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
+event_response_t hidevm::NtOpenKeyTransactedEx_cb(drakvuf_t, drakvuf_trap_info_t* info)
 {
-    return hidevm_open_key_entry(this, drakvuf, info);
+    return hidevm_open_key_entry(this, this->drakvuf, info);
 }
 
 hidevm::hidevm(drakvuf_t drakvuf, const hidevm_config* config, output_format_t output): pluginex(drakvuf, output), drakvuf(drakvuf), format(output)
@@ -911,11 +911,11 @@ hidevm::hidevm(drakvuf_t drakvuf, const hidevm_config* config, output_format_t o
 
     // Hide the Xen Platform PCI device from registry-based VM detection
     // (al-khaser HKLM\SYSTEM\CurrentControlSet\Enum\PCI\VEN_5853* probe).
-    this->NtOpenKey_hook              = createSyscallHook("NtOpenKey",              &hidevm::NtOpenKey_cb);
-    this->NtOpenKeyEx_hook            = createSyscallHook("NtOpenKeyEx",            &hidevm::NtOpenKeyEx_cb);
-    this->NtCreateKey_hook            = createSyscallHook("NtCreateKey",            &hidevm::NtCreateKey_cb);
-    this->NtOpenKeyTransacted_hook    = createSyscallHook("NtOpenKeyTransacted",    &hidevm::NtOpenKeyTransacted_cb);
-    this->NtOpenKeyTransactedEx_hook  = createSyscallHook("NtOpenKeyTransactedEx",  &hidevm::NtOpenKeyTransactedEx_cb);
+    this->NtOpenKey_hook              = createSyscallHook("NtOpenKey", &hidevm::NtOpenKey_cb);
+    this->NtOpenKeyEx_hook            = createSyscallHook("NtOpenKeyEx", &hidevm::NtOpenKeyEx_cb);
+    this->NtCreateKey_hook            = createSyscallHook("NtCreateKey", &hidevm::NtCreateKey_cb);
+    this->NtOpenKeyTransacted_hook    = createSyscallHook("NtOpenKeyTransacted", &hidevm::NtOpenKeyTransacted_cb);
+    this->NtOpenKeyTransactedEx_hook  = createSyscallHook("NtOpenKeyTransactedEx", &hidevm::NtOpenKeyTransactedEx_cb);
 
     // Usermode hooking for WQL spoofing
     if (!drakvuf_are_userhooks_supported(drakvuf))
