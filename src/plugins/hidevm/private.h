@@ -196,8 +196,15 @@ const uint8_t WMI_data[] = {0xD4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 #define WmiKmQueryData_Flags      0x0000002C
 #define WmiKmQueryData_DataLen    0x00000030
 
-#define STATUS_SUCCESS            0x00000000
-#define STATUS_WMI_GUID_NOT_FOUND 0xC0000295
+#define STATUS_SUCCESS                 0x00000000
+#define STATUS_WMI_GUID_NOT_FOUND      0xC0000295
+#define STATUS_OBJECT_NAME_NOT_FOUND   0xC0000034
+
+// Substring (case-insensitive) used to detect Xen Platform PCI registry keys.
+// Full path example:
+//   \REGISTRY\MACHINE\SYSTEM\CurrentControlSet\Enum\PCI\VEN_5853&DEV_0001&SUBSYS_...
+// We match on the device-class fragment so any ControlSet variant is covered.
+#define HIDEVM_XEN_PCI_KEY_FRAGMENT    "\\enum\\pci\\ven_5853"
 
 // Stages
 #define STAGE_WMI_OPEN_BLOCK             1

@@ -711,6 +711,148 @@ static void on_dll_hooked(drakvuf_t drakvuf, const dll_view_t* dll, const std::v
     PRINT_DEBUG("[HIDEVM] DLL hooked - done\n");
 }
 
+// ---------------------------------------------------------------------------
+// Registry hiding for the Xen Platform PCI device (vendor ID 0x5853 == "XS").
+//
+// Al-khaser probes HKLM\SYSTEM\CurrentControlSet\Enum\PCI\VEN_5853* to detect
+// Xen. We can't remove the PCI device itself (Xen PV drivers attach to it),
+// so we hook the Nt registry-open paths and translate any open of a key whose
+// path contains "\Enum\PCI\VEN_5853" into STATUS_OBJECT_NAME_NOT_FOUND.
+// ---------------------------------------------------------------------------
+
+static char* hidevm_get_key_path_from_attr(drakvuf_t drakvuf, drakvuf_trap_info_t* info,
+    addr_t attr, addr_t objattr_root_off, addr_t objattr_name_off)
+{
+    if (!attr) return nullptr;
+
+    auto vmi = vmi_lock_guard(drakvuf);
+
+    ACCESS_CONTEXT(ctx,
+        .translate_mechanism = VMI_TM_PROCESS_DTB,
+        .dtb = info->regs->cr3
+    );
+
+    addr_t key_handle = 0;
+    ctx.addr = attr + objattr_root_off;
+    if (VMI_FAILURE == vmi_read_addr(vmi, &ctx, &key_handle))
+        return nullptr;
+
+    addr_t key_name_addr = 0;
+    ctx.addr = attr + objattr_name_off;
+    if (VMI_FAILURE == vmi_read_addr(vmi, &ctx, &key_name_addr))
+        return nullptr;
+
+    gchar* key_root_p = drakvuf_reg_keyhandle_path(drakvuf, info, key_handle);
+    unicode_string_t* us = drakvuf_read_unicode(drakvuf, info, key_name_addr);
+    if (!us)
+    {
+        g_free(key_root_p);
+        return nullptr;
+    }
+
+    char* key_path = g_strdup_printf("%s%s%s",
+        key_root_p ?: "",
+        key_root_p ? "\\" : "",
+        (const char*)us->contents ?: "");
+    g_free(key_root_p);
+    vmi_free_unicode_str(us);
+
+    return key_path;
+}
+
+static bool hidevm_is_xen_pci_key(const char* path)
+{
+    if (!path) return false;
+    gchar* lower = g_ascii_strdown(path, -1);
+    bool match = (g_strstr_len(lower, -1, HIDEVM_XEN_PCI_KEY_FRAGMENT) != nullptr);
+    g_free(lower);
+    return match;
+}
+
+event_response_t hidevm::HideKeyReturn_cb(drakvuf_t, drakvuf_trap_info_t* info)
+{
+    auto vmi = vmi_lock_guard(drakvuf);
+    auto params = libhook::GetTrapParams(info);
+    auto hook_ID = make_hook_id(info, params->target_rsp);
+
+    if (this->hide_key_ret_hooks.count(hook_ID))
+    {
+        if (params->verifyResultCallParams(drakvuf, info))
+        {
+            if (VMI_FAILURE == vmi_set_vcpureg(vmi, STATUS_OBJECT_NAME_NOT_FOUND, RAX, info->vcpu))
+            {
+                PRINT_DEBUG("[HIDEVM] HideKey return: failed to set RAX to STATUS_OBJECT_NAME_NOT_FOUND\n");
+            }
+        }
+        this->hide_key_ret_hooks.erase(hook_ID);
+    }
+
+    return VMI_EVENT_RESPONSE_NONE;
+}
+
+// Common entry-callback body for NtOpenKey / NtOpenKeyEx / NtCreateKey /
+// NtOpenKeyTransacted / NtOpenKeyTransactedEx — all of these take
+// POBJECT_ATTRIBUTES as their 3rd argument.
+static event_response_t hidevm_open_key_entry(hidevm* plugin, drakvuf_t drakvuf, drakvuf_trap_info_t* info)
+{
+    addr_t objattr = drakvuf_get_function_argument(drakvuf, info, 3);
+    if (!objattr)
+        return VMI_EVENT_RESPONSE_NONE;
+
+    char* key_path = hidevm_get_key_path_from_attr(drakvuf, info, objattr,
+        plugin->objattr_root, plugin->objattr_name);
+    if (!key_path)
+        return VMI_EVENT_RESPONSE_NONE;
+
+    if (hidevm_is_xen_pci_key(key_path))
+    {
+        auto params = libhook::GetTrapParams(info);
+        auto hook_ID = make_hook_id(info, params->target_rsp);
+
+        // Avoid stacking duplicate return hooks on the same thread frame.
+        if (!plugin->hide_key_ret_hooks.count(hook_ID))
+        {
+            auto hook = plugin->createReturnHook(info, &hidevm::HideKeyReturn_cb);
+            if (hook)
+            {
+                plugin->hide_key_ret_hooks[hook_ID] = std::move(hook);
+                fmt::print(plugin->format, "hidevm", drakvuf, info,
+                    keyval("Reason", fmt::Qstr("Xen PCI registry key hidden")),
+                    keyval("KeyName", fmt::Qstr(key_path))
+                );
+            }
+        }
+    }
+
+    g_free(key_path);
+    return VMI_EVENT_RESPONSE_NONE;
+}
+
+event_response_t hidevm::NtOpenKey_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
+{
+    return hidevm_open_key_entry(this, drakvuf, info);
+}
+
+event_response_t hidevm::NtOpenKeyEx_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
+{
+    return hidevm_open_key_entry(this, drakvuf, info);
+}
+
+event_response_t hidevm::NtCreateKey_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
+{
+    return hidevm_open_key_entry(this, drakvuf, info);
+}
+
+event_response_t hidevm::NtOpenKeyTransacted_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
+{
+    return hidevm_open_key_entry(this, drakvuf, info);
+}
+
+event_response_t hidevm::NtOpenKeyTransactedEx_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
+{
+    return hidevm_open_key_entry(this, drakvuf, info);
+}
+
 hidevm::hidevm(drakvuf_t drakvuf, const hidevm_config* config, output_format_t output): pluginex(drakvuf, output), drakvuf(drakvuf), format(output)
 {
     // Advance boot time
@@ -754,6 +896,11 @@ hidevm::hidevm(drakvuf_t drakvuf, const hidevm_config* config, output_format_t o
         PRINT_DEBUG("[HIDEVM] Failed to get nt!_OBJECT_ATTRIBUTES.ObjectName offest\n");
         throw -1;
     }
+    if (!drakvuf_get_kernel_struct_member_rva(drakvuf, "_OBJECT_ATTRIBUTES", "RootDirectory", &this->objattr_root))
+    {
+        PRINT_DEBUG("[HIDEVM] Failed to get nt!_OBJECT_ATTRIBUTES.RootDirectory offest\n");
+        throw -1;
+    }
     if (!drakvuf_get_kernel_struct_member_rva(drakvuf, "_IO_STATUS_BLOCK", "Information", &this->iostatusblock_information))
     {
         PRINT_DEBUG("[HIDEVM] Failed to get nt!_IO_STATUS_BLOCK.Information offest\n");
@@ -761,6 +908,14 @@ hidevm::hidevm(drakvuf_t drakvuf, const hidevm_config* config, output_format_t o
     }
 
     this->NtDeviceIoControlFile_hook = createSyscallHook("NtDeviceIoControlFile", &hidevm::NtDeviceIoControlFile_cb);
+
+    // Hide the Xen Platform PCI device from registry-based VM detection
+    // (al-khaser HKLM\SYSTEM\CurrentControlSet\Enum\PCI\VEN_5853* probe).
+    this->NtOpenKey_hook              = createSyscallHook("NtOpenKey",              &hidevm::NtOpenKey_cb);
+    this->NtOpenKeyEx_hook            = createSyscallHook("NtOpenKeyEx",            &hidevm::NtOpenKeyEx_cb);
+    this->NtCreateKey_hook            = createSyscallHook("NtCreateKey",            &hidevm::NtCreateKey_cb);
+    this->NtOpenKeyTransacted_hook    = createSyscallHook("NtOpenKeyTransacted",    &hidevm::NtOpenKeyTransacted_cb);
+    this->NtOpenKeyTransactedEx_hook  = createSyscallHook("NtOpenKeyTransactedEx",  &hidevm::NtOpenKeyTransactedEx_cb);
 
     // Usermode hooking for WQL spoofing
     if (!drakvuf_are_userhooks_supported(drakvuf))
