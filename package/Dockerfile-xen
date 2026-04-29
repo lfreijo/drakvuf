@@ -12,15 +12,14 @@ RUN mkdir -p /log && \
 
 COPY xen /build-xen
 COPY package/configure-xen.sh /build-xen
+COPY patches /build-patches
 RUN cd /build-xen && \
     chmod +x configure-xen.sh && \
     ./configure-xen.sh && \
-    echo "Applying ACPI OEM spoofing patch (al-khaser remediation)..." && \
-    sed -i 's/#define ACPI_OEM_ID.*"Xen"/#define ACPI_OEM_ID             "DELL  "/' tools/libacpi/acpi2_0.h && \
-    sed -i 's/#define ACPI_OEM_TABLE_ID.*"HVM"/#define ACPI_OEM_TABLE_ID       "CBX3    "/' tools/libacpi/acpi2_0.h && \
-    sed -i "s/#define ACPI_CREATOR_ID.*ASCII32('H','V','M','L')/#define ACPI_CREATOR_ID         ASCII32('A','M','I',' ')/" tools/libacpi/acpi2_0.h && \
-    for asl in tools/libacpi/dsdt.asl tools/libacpi/ssdt_pm.asl tools/libacpi/ssdt_s3.asl tools/libacpi/ssdt_s4.asl; do \
-        sed -i 's/DefinitionBlock ("\([^"]*\)", "\([^"]*\)", [0-9]*, "Xen", "HVM"/DefinitionBlock ("\1", "\2", 2, "DELL  ", "CBX3    "/' "$asl"; \
+    echo "Applying anti-evasion patches..." && \
+    for p in /build-patches/*.patch; do \
+        echo "  applying $p"; \
+        patch -p1 -t < "$p" || exit 1; \
     done && \
     echo "Building Xen, this may take a few minutes..." && \
     make -j$(nproc) dist-xen && \

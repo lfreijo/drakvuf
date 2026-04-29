@@ -1,0 +1,221 @@
+# 0001-acpi-anti-evasion.patch
+#
+# Anti-evasion ACPI table modifications for Xen HVM guests, per MAP-1793.
+#
+# al-khaser's firmware_ACPI() check (al-khaser/AntiVM/Generic.cpp) flags a
+# guest as a VM if any of the following hold:
+#   1. the literal ASCII bytes "WAET" appear in any ACPI table body
+#   2. no WSMT table (signature 'TMSW' / 'WSMT') is present
+#   3. FACP byte 45 (Preferred_PM_Profile) == 0 ("Unspecified")
+#
+# This patch addresses #1-#3:
+#   * tools/firmware/hvmloader/util.c:912 — replace ACPI_HAS_WAET with
+#     ACPI_HAS_WSMT in the unconditional table_flags OR-mask, so Xen
+#     stops emitting WAET and starts emitting WSMT.
+#   * tools/libacpi/{libacpi.h,acpi2_0.h,static_tables.c,build.c} — add
+#     the WSMT table type (struct, signature, revision, static instance,
+#     constructor) and register it in acpi_build_tables. The protection
+#     flags are set to FIXED_COMM_BUFFERS | COMM_BUFFER_NESTED_PTR_PROTECTION
+#     | SYSTEM_RESOURCE_PROTECTION because DRAKVUF guests don't expose SMM
+#     and so cannot violate any of WSMT's assertions.
+#   * tools/libacpi/static_tables.c — set FADT preferred_pm_profile = 1
+#     (Desktop) so byte 45 is non-zero.
+#
+# al-khaser's 4th condition (each of PNP0000/PNP0C0C/PNP0C0E/PNP0C14/PNP0D80
+# must appear as literal ASCII in EVERY enumerated ACPI table body) is left
+# unaddressed pending validation that #1-#3 are sufficient. The 4th check
+# is so aggressive that it likely fails on real bare metal too; revisit
+# only if al-khaser still flags ACPI after this patch is deployed.
+#
+# Path: applied with `patch -p1` from the Xen source root inside Dockerfile-xen.
+
+diff --git a/tools/firmware/hvmloader/util.c b/tools/firmware/hvmloader/util.c
+index d3b3f90..77b684c 100644
+--- a/tools/firmware/hvmloader/util.c
++++ b/tools/firmware/hvmloader/util.c
+@@ -909,7 +909,13 @@ void hvmloader_acpi_build_tables(struct acpi_config *config,
+     if ( !strncmp(xenstore_read("platform/acpi_laptop_slate", "0"), "1", 1)  )
+         config->table_flags |= ACPI_HAS_SSDT_LAPTOP_SLATE;
+ 
+-    config->table_flags |= (ACPI_HAS_IOAPIC | ACPI_HAS_WAET |
++    /*
++     * Anti-evasion: emit WSMT, suppress WAET. al-khaser's firmware_ACPI()
++     * scans every ACPI table for the literal ASCII bytes "WAET" and flags
++     * any hit as a VM, and separately requires a WSMT table to exist. See
++     * al-khaser/AntiVM/Generic.cpp:firmware_ACPI() and MAP-1793.
++     */
++    config->table_flags |= (ACPI_HAS_IOAPIC | ACPI_HAS_WSMT |
+                             ACPI_HAS_PMTIMER | ACPI_HAS_BUTTONS |
+                             ACPI_HAS_VGA | ACPI_HAS_8042 |
+                             ACPI_HAS_CMOS_RTC);
+diff --git a/tools/libacpi/acpi2_0.h b/tools/libacpi/acpi2_0.h
+index 6dfa939..5e2571d 100644
+--- a/tools/libacpi/acpi2_0.h
++++ b/tools/libacpi/acpi2_0.h
+@@ -327,6 +327,24 @@ struct acpi_20_waet {
+     uint32_t           flags;
+ };
+ 
++/*
++ * Windows SMM Security Mitigations Table (WSMT)
++ *
++ * Microsoft-defined ACPI table. Presence (and the FIXED_COMM_BUFFERS flag)
++ * declares to the OS that SMM communication buffers are isolated. We emit
++ * an empty/safe variant so anti-VM scanners that require WSMT find it.
++ *
++ * Spec: "Windows SMM Security Mitigations Table" rev 1, Microsoft.
++ */
++struct acpi_20_wsmt {
++    struct acpi_header header;
++    uint32_t           protection_flags;
++};
++
++#define ACPI_2_0_WSMT_FIXED_COMM_BUFFERS    (1U << 0)
++#define ACPI_2_0_WSMT_COMM_BUFFER_NESTED_PTR_PROTECTION (1U << 1)
++#define ACPI_2_0_WSMT_SYSTEM_RESOURCE_PROTECTION (1U << 2)
++
+ /*
+  * Multiple APIC Flags.
+  */
+@@ -456,6 +474,7 @@ struct acpi_20_slit {
+ #define ACPI_2_0_TPM2_SIGNATURE ASCII32('T','P','M','2')
+ #define ACPI_2_0_HPET_SIGNATURE ASCII32('H','P','E','T')
+ #define ACPI_2_0_WAET_SIGNATURE ASCII32('W','A','E','T')
++#define ACPI_2_0_WSMT_SIGNATURE ASCII32('W','S','M','T')
+ #define ACPI_2_0_SRAT_SIGNATURE ASCII32('S','R','A','T')
+ #define ACPI_2_0_SLIT_SIGNATURE ASCII32('S','L','I','T')
+ 
+@@ -470,6 +489,7 @@ struct acpi_20_slit {
+ #define ACPI_2_0_TPM2_REVISION 0x04
+ #define ACPI_2_0_HPET_REVISION 0x01
+ #define ACPI_2_0_WAET_REVISION 0x01
++#define ACPI_2_0_WSMT_REVISION 0x01
+ #define ACPI_1_0_FADT_REVISION 0x01
+ #define ACPI_2_0_SRAT_REVISION 0x01
+ #define ACPI_2_0_SLIT_REVISION 0x01
+diff --git a/tools/libacpi/build.c b/tools/libacpi/build.c
+index 2f29863..65d7756 100644
+--- a/tools/libacpi/build.c
++++ b/tools/libacpi/build.c
+@@ -29,6 +29,7 @@ extern struct acpi_20_xsdt Xsdt;
+ extern struct acpi_fadt Fadt;
+ extern struct acpi_20_facs Facs;
+ extern struct acpi_20_waet Waet;
++extern struct acpi_20_wsmt Wsmt;
+ 
+ /*
+  * Located at ACPI_INFO_PHYSICAL_ADDRESS.
+@@ -203,6 +204,22 @@ static struct acpi_20_waet *construct_waet(struct acpi_ctxt *ctxt,
+     return waet;
+ }
+ 
++static struct acpi_20_wsmt *construct_wsmt(struct acpi_ctxt *ctxt,
++                                           const struct acpi_config *config)
++{
++    struct acpi_20_wsmt *wsmt;
++
++    wsmt = ctxt->mem_ops.alloc(ctxt, sizeof(*wsmt), 16);
++    if (!wsmt) return NULL;
++
++    memcpy(wsmt, &Wsmt, sizeof(*wsmt));
++
++    wsmt->header.length = sizeof(*wsmt);
++    set_checksum(wsmt, offsetof(struct acpi_header, checksum), sizeof(*wsmt));
++
++    return wsmt;
++}
++
+ static struct acpi_20_srat *construct_srat(struct acpi_ctxt *ctxt,
+                                            const struct acpi_config *config)
+ {
+@@ -341,6 +358,7 @@ static int construct_secondary_tables(struct acpi_ctxt *ctxt,
+     struct acpi_20_madt *madt;
+     struct acpi_20_hpet *hpet;
+     struct acpi_20_waet *waet;
++    struct acpi_20_wsmt *wsmt;
+     struct acpi_20_tcpa *tcpa;
+     struct acpi_20_tpm2 *tpm2;
+     unsigned char *ssdt;
+@@ -371,6 +389,15 @@ static int construct_secondary_tables(struct acpi_ctxt *ctxt,
+         table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, waet);
+     }
+ 
++    /* WSMT (Microsoft anti-evasion compatibility). */
++    if ( config->table_flags & ACPI_HAS_WSMT )
++    {
++        wsmt = construct_wsmt(ctxt, config);
++        if ( !wsmt )
++            return -1;
++        table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, wsmt);
++    }
++
+     if ( config->table_flags & ACPI_HAS_SSDT_PM )
+     {
+         ssdt = ctxt->mem_ops.alloc(ctxt, sizeof(ssdt_pm), 16);
+diff --git a/tools/libacpi/libacpi.h b/tools/libacpi/libacpi.h
+index deda39e..4c3530e 100644
+--- a/tools/libacpi/libacpi.h
++++ b/tools/libacpi/libacpi.h
+@@ -27,6 +27,7 @@
+ #define ACPI_HAS_8042              (1<<13)
+ #define ACPI_HAS_CMOS_RTC          (1<<14)
+ #define ACPI_HAS_SSDT_LAPTOP_SLATE (1<<15)
++#define ACPI_HAS_WSMT              (1<<16)
+ 
+ struct xen_vmemrange;
+ struct acpi_numa {
+diff --git a/tools/libacpi/static_tables.c b/tools/libacpi/static_tables.c
+index 715f46f..b387619 100644
+--- a/tools/libacpi/static_tables.c
++++ b/tools/libacpi/static_tables.c
+@@ -43,6 +43,12 @@ struct acpi_fadt Fadt = {
+         .creator_revision = ACPI_CREATOR_REVISION
+     },
+ 
++    /*
++     * Preferred_PM_Profile = 1 (Desktop). Anti-evasion: tools (e.g. al-khaser)
++     * treat 0 (Unspecified) as a sandbox indicator. ACPI 5.0 table 5-34.
++     */
++    .preferred_pm_profile = 1,
++
+     .sci_int = 9,
+ 
+     .pm1a_evt_blk = ACPI_PM1A_EVT_BLK_ADDRESS_V1,
+@@ -140,7 +146,7 @@ struct acpi_20_waet Waet = {
+         .signature    = ACPI_2_0_WAET_SIGNATURE,
+         .length       = sizeof(struct acpi_20_waet),
+         .revision     = ACPI_2_0_WAET_REVISION,
+-        .oem_id       = ACPI_OEM_ID, 
++        .oem_id       = ACPI_OEM_ID,
+         .oem_table_id = ACPI_OEM_TABLE_ID,
+         .oem_revision = ACPI_OEM_REVISION,
+         .creator_id   = ACPI_CREATOR_ID,
+@@ -149,6 +155,28 @@ struct acpi_20_waet Waet = {
+     .flags = ACPI_WAET_FLAGS
+ };
+ 
++/*
++ * WSMT (Windows SMM Security Mitigations Table). Anti-evasion: emit so that
++ * tools requiring its presence don't flag the guest as a VM. We declare all
++ * three protection flags since DRAKVUF guests don't expose SMM at all and so
++ * cannot violate the assertions WSMT makes about SMM communication buffers.
++ */
++struct acpi_20_wsmt Wsmt = {
++    .header = {
++        .signature    = ACPI_2_0_WSMT_SIGNATURE,
++        .length       = sizeof(struct acpi_20_wsmt),
++        .revision     = ACPI_2_0_WSMT_REVISION,
++        .oem_id       = ACPI_OEM_ID,
++        .oem_table_id = ACPI_OEM_TABLE_ID,
++        .oem_revision = ACPI_OEM_REVISION,
++        .creator_id   = ACPI_CREATOR_ID,
++        .creator_revision = ACPI_CREATOR_REVISION
++    },
++    .protection_flags = (ACPI_2_0_WSMT_FIXED_COMM_BUFFERS |
++                         ACPI_2_0_WSMT_COMM_BUFFER_NESTED_PTR_PROTECTION |
++                         ACPI_2_0_WSMT_SYSTEM_RESOURCE_PROTECTION)
++};
++
+ /*
+  * Local variables:
+  * mode: C
