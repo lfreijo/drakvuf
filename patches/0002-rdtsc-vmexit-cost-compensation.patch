@@ -1,124 +1,135 @@
-# 0002-rdtsc-vmexit-cost-compensation.patch (v3)
+# 0002-rdtsc-vmexit-cost-compensation.patch (v4)
 #
 # MAP-1793: subtract the wall-clock cost of CPUID-induced VMEXITs from the
 # guest-visible TSC so anti-VM tools (al-khaser test #11 "Checking RDTSC
 # which force a VM Exit (cpuid)") can't use the elevated cycle delta as a
 # sandbox tell.
 #
-# v1 sampled both timestamps inside vmx_vmexit_handler() and only captured
-# the in-handler portion (~5-15k cycles). With DRAKVUF cpuidmon active,
-# the bulk of the cost is the *monitor-induced pause + reschedule* that
-# happens AFTER the handler returns -- v1 missed that.
+# History:
+#   v1 (in-handler): worked but only covered ~5-15k cycles. With DRAKVUF
+#       cpuidmon active the bulk of the cost was the userspace ring
+#       round-trip *after* the handler returned, so most of the cost
+#       leaked through.
+#   v3 (hvm_do_resume): tried to capture the post-pause window via the
+#       scheduler resume path. Only fires when the vCPU is actually
+#       descheduled, so once cpuidmon was dropped (no async pause) the
+#       hook never ran and 0 cycles got subtracted.
+#   v4 (this file): cpuidmon is gone -> there is no async pause -> the
+#       in-handler window IS the entire CPUID VMEXIT cost. Reverts to
+#       v1's structure: sample at handler entry, subtract at the end of
+#       the switch, all synchronous, fires on every CPUID exit.
 #
-# v3 mechanism:
-#   * vmx_vmexit_handler() stamps `v->arch.hvm.tc_vmexit_start_tsc` for
-#     CPUID exits only, immediately after VM_EXIT_REASON is read.
-#   * hvm_do_resume() (which runs after any monitor pause + scheduler
-#     activity, just before VMENTER) computes the elapsed cycles, clamps
-#     them, subtracts from `v->arch.hvm.cache_tsc_offset`, writes through
-#     to the VMCS via hvm_set_tsc_offset(), and clears the field.
+# Mechanism:
+#   * After __vmread(VM_EXIT_REASON, ...), sample rdtsc_ordered() into a
+#     local tc_vmexit_start_tsc.
+#   * Just before the `out:` label, if the exit reason was CPUID, sample
+#     rdtsc_ordered() again, compute (now - start), clamp, subtract from
+#     v->arch.hvm.cache_tsc_offset, and write through to the VMCS via
+#     hvm_set_tsc_offset(). Per-pCPU counter tc_vmexit_compensated_cycles
+#     is bumped for diagnostics.
 #
-# Calibration (DRAKVUF on serv420, 4096-sample microbench):
-#     pre-patch median 167624 cycles, p99 510208
-#     v1 patch  median 145604 cycles, p99 1174414  (only in-handler portion)
-#     v3 target median <1000  cycles                (full exit-to-entry)
+# Calibration (DRAKVUF on serv420 *without* cpuidmon, 4096-sample microbench):
+#     pre-patch median 2360 cycles, p99 3348 (plain-Xen exit cost)
+#     post-v4 expected: median <500 cycles -> al-khaser #11 PASS
 #
-# Tunables in hvm_do_resume() body: MIN clamp (200 cycles, noise floor)
-# and MAX clamp (4194304 cycles, ~2ms at 2GHz -- covers DRAKVUF tail
-# without billing the guest for full scheduler-preemption gaps).
+# Tunables:
+#   TC_VMEXIT_MIN_CYCLES        200     noise floor
+#   TC_VMEXIT_MAX_ADJUST_CYCLES 524288  ~256us at 2GHz; sized to ride out
+#                                       any rare outliers without billing
+#                                       the guest for full preemption gaps.
 #
 # Path: applied with `patch -p1` from the Xen source root inside Dockerfile-xen.
 
-diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
-index 0f06307..a6abc8c 100644
---- a/xen/arch/x86/hvm/hvm.c
-+++ b/xen/arch/x86/hvm/hvm.c
-@@ -547,6 +547,48 @@ void hvm_do_resume(struct vcpu *v)
-             v->arch.monitor.next_interrupt_enabled = false;
-         }
-     }
-+
-+    /*
-+     * MAP-1793: subtract the full CPUID-VMEXIT cost (handler + monitor
-+     * pause + reschedule) from the guest TSC offset so the next guest
-+     * RDTSC reads as if the exit never happened. This defeats al-khaser
-+     * test #11 ("Checking RDTSC which force a VM Exit (cpuid)") which
-+     * compares (rdtsc; cpuid; rdtsc) cycle deltas against ~1000 cycles.
-+     *
-+     * Calibration on serv420 (DRAKVUF + cpuidmon, 4096 samples):
-+     *   pre-patch  median 167624  p99 510208
-+     *   post-v1    median 145604  p99 1174414  (in-handler-only, missed pause)
-+     * Most of the cost is the monitor-induced pause/reschedule, which only
-+     * resolves by the time hvm_do_resume() runs -- hence the placement.
-+     *
-+     * Clamps:
-+     *   MIN: noise floor; below this the cost is negligible and the rdtsc
-+     *        sample noise dominates.
-+     *   MAX: ceiling that covers DRAKVUF p99 with headroom but discards
-+     *        full-scheduler-preemption outliers (multi-millisecond gaps),
-+     *        so we don't credit the guest with a free time-warp on
-+     *        unrelated host activity.
-+     */
-+    if ( v->arch.hvm.tc_vmexit_start_tsc )
-+    {
-+        uint64_t start = v->arch.hvm.tc_vmexit_start_tsc;
-+        uint64_t now = rdtsc_ordered();
-+
-+        v->arch.hvm.tc_vmexit_start_tsc = 0;
-+
-+        if ( now > start )
-+        {
-+            uint64_t cost = now - start;
-+
-+            if ( cost > 200ULL )
-+            {
-+                if ( cost > 4194304ULL )
-+                    cost = 4194304ULL;
-+                v->arch.hvm.cache_tsc_offset -= cost;
-+                hvm_set_tsc_offset(v, v->arch.hvm.cache_tsc_offset, 0);
-+            }
-+        }
-+    }
- }
- 
- static int cf_check hvm_print_line(
 diff --git a/xen/arch/x86/hvm/vmx/vmx.c b/xen/arch/x86/hvm/vmx/vmx.c
-index 1373ef2..3d67f8f 100644
+index 1373ef2..2f4881c 100644
 --- a/xen/arch/x86/hvm/vmx/vmx.c
 +++ b/xen/arch/x86/hvm/vmx/vmx.c
-@@ -4093,6 +4093,15 @@ void asmlinkage vmx_vmexit_handler(struct cpu_user_regs *regs)
+@@ -4058,6 +4058,27 @@ static void undo_nmis_unblocked_by_iret(void)
+               guest_info | VMX_INTR_SHADOW_NMI);
+ }
+ 
++/*
++ * MAP-1793 anti-evasion clamps for guest-visible CPUID VMEXIT cost.
++ *
++ * al-khaser test #11 ("Checking RDTSC which force a VM Exit (cpuid)")
++ * times (rdtsc; cpuid; rdtsc) and trips on avg > ~1000 cycles. Native
++ * CPUID is ~50-200 cycles, plain Xen HVM CPUID is ~1500-4000. We sample
++ * rdtsc_ordered() at handler entry, recompute at the end of the switch
++ * for CPUID exits, and subtract the cost from the vCPU's TSC offset.
++ *
++ * MIN: noise floor; below this the measurement is dominated by sample
++ *   skew and the cost is too small to matter for evasion checks.
++ * MAX: hard ceiling. Sized to fully cover plain-Xen p99 CPUID exits with
++ *   headroom but well below the multi-millisecond preemption tail, so we
++ *   don't credit the guest with a free time-warp on unrelated host activity.
++ *   524288 cycles == ~256us at 2GHz.
++ */
++#define TC_VMEXIT_MIN_CYCLES        200ULL
++#define TC_VMEXIT_MAX_ADJUST_CYCLES 524288ULL
++
++static DEFINE_PER_CPU(uint64_t, tc_vmexit_compensated_cycles);
++
+ void asmlinkage vmx_vmexit_handler(struct cpu_user_regs *regs)
+ {
+     unsigned long exit_qualification, exit_reason, idtv_info, intr_info = 0;
+@@ -4065,6 +4086,7 @@ void asmlinkage vmx_vmexit_handler(struct cpu_user_regs *regs)
+     unsigned int vector = 0;
+     struct vcpu *v = current;
+     struct domain *currd = v->domain;
++    uint64_t tc_vmexit_start_tsc = 0;
+ 
+     __vmread(GUEST_RIP,    &regs->rip);
+     __vmread(GUEST_RSP,    &regs->rsp);
+@@ -4093,6 +4115,13 @@ void asmlinkage vmx_vmexit_handler(struct cpu_user_regs *regs)
  
      __vmread(VM_EXIT_REASON, &exit_reason);
  
 +    /*
-+     * MAP-1793: stamp the host TSC at the start of a CPUID-induced VMEXIT.
-+     * hvm_do_resume() will compute the elapsed cycles up to VMENTER and
-+     * subtract them from the guest TSC offset, hiding the (potentially
-+     * monitor-pause-amplified) exit cost from anti-VM cycle-delta checks.
++     * MAP-1793: sample TSC right after we know this is a VMEXIT but before
++     * any non-trivial handler work. Used below for CPUID exits to subtract
++     * the wall-clock cost from the guest TSC offset.
 +     */
-+    if ( (uint16_t)exit_reason == EXIT_REASON_CPUID )
-+        v->arch.hvm.tc_vmexit_start_tsc = rdtsc_ordered();
++    tc_vmexit_start_tsc = rdtsc_ordered();
 +
      if ( hvm_long_mode_active(v) )
          TRACE_TIME(TRC_HVM_VMX_EXIT64, exit_reason, regs->rip, regs->rip >> 32);
      else
-diff --git a/xen/arch/x86/include/asm/hvm/vcpu.h b/xen/arch/x86/include/asm/hvm/vcpu.h
-index 196fed6..92e900e 100644
---- a/xen/arch/x86/include/asm/hvm/vcpu.h
-+++ b/xen/arch/x86/include/asm/hvm/vcpu.h
-@@ -126,6 +126,15 @@ struct hvm_vcpu {
-     int64_t             cache_tsc_offset;
-     uint64_t            guest_time;
+@@ -4747,6 +4776,38 @@ void asmlinkage vmx_vmexit_handler(struct cpu_user_regs *regs)
+         break;
+     }
  
 +    /*
-+     * MAP-1793: TSC sample taken at the start of a CPUID-induced VMEXIT,
-+     * consumed by hvm_do_resume() to subtract the full exit-to-entry cost
-+     * (including any monitor-induced pause/reschedule) from the guest TSC
-+     * offset. Defeats al-khaser test #11 (rdtsc; cpuid; rdtsc) and similar
-+     * cycle-delta sandbox checks. Zero when no compensation is pending.
++     * MAP-1793: hide the CPUID VMEXIT cost from the guest TSC. al-khaser
++     * (and similar anti-VM checks) measure (rdtsc; cpuid; rdtsc) and
++     * compare the delta against ~1000 cycles. Subtract the actual cost
++     * we just incurred from the vCPU's cache_tsc_offset so the next guest
++     * RDTSC reads as if the exit never happened. Clamps preserve guest
++     * TSC monotonicity and reject preemption-induced outliers.
++     *
++     * Synchronous-only path: this fires for every CPUID exit, including
++     * those that don't trigger a vm_event-monitor pause/reschedule. Since
++     * this deployment dropped the cpuidmon plugin, the in-handler window
++     * IS the full guest-visible cost (~1500-4000 cycles plain Xen).
 +     */
-+    uint64_t            tc_vmexit_start_tsc;
++    if ( (uint16_t)exit_reason == EXIT_REASON_CPUID && tc_vmexit_start_tsc )
++    {
++        uint64_t now = rdtsc_ordered();
 +
-     /* Lock and list for virtual platform timers. */
-     spinlock_t          tm_lock;
-     struct list_head    tm_list;
++        if ( now > tc_vmexit_start_tsc )
++        {
++            uint64_t cost = now - tc_vmexit_start_tsc;
++
++            if ( cost > TC_VMEXIT_MIN_CYCLES )
++            {
++                if ( cost > TC_VMEXIT_MAX_ADJUST_CYCLES )
++                    cost = TC_VMEXIT_MAX_ADJUST_CYCLES;
++                v->arch.hvm.cache_tsc_offset -= cost;
++                hvm_set_tsc_offset(v, v->arch.hvm.cache_tsc_offset, 0);
++                this_cpu(tc_vmexit_compensated_cycles) += cost;
++            }
++        }
++    }
++
+ out:
+     if ( nestedhvm_vcpu_in_guestmode(v) )
+         nvmx_idtv_handling();
