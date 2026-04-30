@@ -7,10 +7,10 @@
 # also FAILS, and ULONGLONG underflow wraps to ~2^64 which FAILS too.
 #
 # Plain-Xen CPUID exit cost on this hardware is ~2300 cycles (rdtsc-bench
-# median 2342, p99 3398, min 2326 with no cpuidmon). Subtract 1500 cycles
-# fixed per CPUID exit, leaving guest delta ~800 -- comfortably below
+# median 2342, p99 3398, min 2326 with no cpuidmon). Subtract 2200 cycles
+# fixed per CPUID exit, leaving guest delta ~100-300 -- comfortably below
 # al-khaser's 1000 threshold and well above 0. Min observed cost is 2326,
-# so subtracting 1500 never underflows for normal exits.
+# so subtracting 2200 never underflows for plain Xen min ~2326 for normal exits.
 #
 # Trade-off: outlier exits (host preemption etc., max observed 64720) leave
 # a large delta that can spike avg above 1000 in a given 10-sample run.
@@ -40,7 +40,7 @@ index 1373ef2..31c2fa7 100644
 + * median; p99 ~3400). To land in the al-khaser PASS window we want a
 + * residual guest delta around 300-800 cycles, so subtract a fixed amount
 + * that's smaller than the minimum observed cost (rdtsc-bench min was 2326)
-+ * but large enough to push median into range. 1500 cycles works for typical
++ * but large enough to push median into range. 2200 cycles works for typical
 + * exits. Outlier exits (preemption etc.) can still push avg over 1000 in a
 + * given 10-sample run; they're rare enough that most al-khaser invocations
 + * land safely inside the PASS window.
@@ -56,7 +56,7 @@ index 1373ef2..31c2fa7 100644
 + *       iterations from cumulative ~2 seconds of TSC backwards.
 + *   v7: fixed-amount subtraction tuned for al-khaser's (0, 1000) window.
 + */
-+#define TC_VMEXIT_SUBTRACT_CYCLES   1500ULL
++#define TC_VMEXIT_SUBTRACT_CYCLES   2200ULL
 +
 +static DEFINE_PER_CPU(uint64_t, tc_vmexit_compensated_cycles);
 +
