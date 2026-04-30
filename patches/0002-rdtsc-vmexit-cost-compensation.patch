@@ -1,85 +1,87 @@
-# 0002-rdtsc-vmexit-cost-compensation.patch (v5 - DEBUG)
+# 0002-rdtsc-vmexit-cost-compensation.patch (v7)
 #
-# v4's measured-cost subtraction compiled in correctly (verified via
-# objdump on the deployed xen-syms) but had no observable effect on the
-# guest-visible RDTSC delta. Either the offset write isn't reaching the
-# live VMCS, or the magnitude is too small for al-khaser's averaging.
+# v6 confirmed (by hanging the guest on rdtsc-bench's 4096 iterations) that
+# direct __vmwrite(TSC_OFFSET) reaches the live VMCS. The remaining problem
+# was tuning, not plumbing: al-khaser's rdtsc_diff_vmexit() PASSES only when
+# avg cycles per (rdtsc; cpuid; rdtsc) sample is in (0, 1000) -- avg == 0
+# also FAILS, and ULONGLONG underflow wraps to ~2^64 which FAILS too.
 #
-# v5 makes both possibilities decisive:
-#   - Hardcoded 1,000,000-cycle subtraction per CPUID exit (no measurement)
-#   - Direct __vmwrite(TSC_OFFSET, ...) bypassing hvm_set_tsc_offset()
+# Plain-Xen CPUID exit cost on this hardware is ~2300 cycles (rdtsc-bench
+# median 2342, p99 3398, min 2326 with no cpuidmon). Subtract 1500 cycles
+# fixed per CPUID exit, leaving guest delta ~800 -- comfortably below
+# al-khaser's 1000 threshold and well above 0. Min observed cost is 2326,
+# so subtracting 1500 never underflows for normal exits.
 #
-# Expected behavior:
-#   - rdtsc-bench median drops to 0 (clamped via (t2 >= t1) ? : 0) -> v4
-#     was just under-subtracting; switch back to dynamic measurement with
-#     a much more aggressive multiplier in v6.
-#   - rdtsc-bench median stays ~2300 -> the offset write isn't reaching
-#     the live VMCS at all; need a different approach (e.g. modify VMCS
-#     fields via a vm_event hook, or different VMCS field, etc).
-#
-# This is INTENTIONALLY destructive of guest TSC monotonicity for the
-# duration of validation. Do NOT ship to production while this is in.
+# Trade-off: outlier exits (host preemption etc., max observed 64720) leave
+# a large delta that can spike avg above 1000 in a given 10-sample run.
+# Most al-khaser invocations should still PASS; rare false-positives are
+# acceptable for now and could be addressed later by a measured-cost path
+# that captures the full pre-/post-handler asm window.
 #
 # Path: applied with `patch -p1` from the Xen source root inside Dockerfile-xen.
 
 diff --git a/xen/arch/x86/hvm/vmx/vmx.c b/xen/arch/x86/hvm/vmx/vmx.c
-index 1373ef2..f5fd88e 100644
+index 1373ef2..31c2fa7 100644
 --- a/xen/arch/x86/hvm/vmx/vmx.c
 +++ b/xen/arch/x86/hvm/vmx/vmx.c
-@@ -4058,6 +4058,35 @@ static void undo_nmis_unblocked_by_iret(void)
+@@ -4058,6 +4058,38 @@ static void undo_nmis_unblocked_by_iret(void)
                guest_info | VMX_INTR_SHADOW_NMI);
  }
  
 +/*
-+ * MAP-1793 v5: aggressive in-handler TSC offset compensation, direct __vmwrite.
++ * MAP-1793 v7: tuned TSC offset shift for al-khaser test #11.
 + *
-+ * v4 used hvm_set_tsc_offset() (an indirect call through hvm_funcs) and a
-+ * dynamically-measured cost. Disasm confirmed the patch was compiled in and
-+ * executed, but rdtsc-bench inside the guest showed unchanged median cycles --
-+ * implying the offset write either wasn't reaching the in-memory VMCS or was
-+ * being overwritten somewhere else before VMENTER. v5 short-circuits both
-+ * possibilities:
-+ *   - Hardcoded subtraction of TC_VMEXIT_FORCED_CYCLES (1,000,000 cycles --
-+ *     ~500us at 2GHz). Guest RDTSC after CPUID will read ~1M cycles in the
-+ *     *past* relative to before, and rdtsc-bench's clamp `(t2 >= t1) ? : 0`
-+ *     will report 0 if the offset write took effect.
-+ *   - Direct `__vmwrite(TSC_OFFSET, ...)` bypassing hvm_set_tsc_offset() so
-+ *     there's no chance of dispatch table issues.
++ * al-khaser's rdtsc_diff_vmexit() does (rdtsc; cpuid(0); rdtsc) ten times,
++ * averages, and PASSES only when the average is in (0, 1000). avg == 0
++ * also FAILS, and because avg is unsigned, any per-iteration delta that
++ * underflows wraps to ~2^64 -- which also FAILS.
 + *
-+ * If v5 produces median cycles near 0 in rdtsc-bench, we know the offset
-+ * write is effective and v4's failure was due to magnitude (subtracted too
-+ * little to overcome al-khaser's averaging). Switch back to dynamic
-+ * measurement with a more aggressive multiplier.
++ * Plain-Xen CPUID exit cost on this hardware is ~2300 cycles (rdtsc-bench
++ * median; p99 ~3400). To land in the al-khaser PASS window we want a
++ * residual guest delta around 300-800 cycles, so subtract a fixed amount
++ * that's smaller than the minimum observed cost (rdtsc-bench min was 2326)
++ * but large enough to push median into range. 1500 cycles works for typical
++ * exits. Outlier exits (preemption etc.) can still push avg over 1000 in a
++ * given 10-sample run; they're rare enough that most al-khaser invocations
++ * land safely inside the PASS window.
 + *
-+ * If v5 STILL produces median ~2300, the offset write isn't reaching the
-+ * in-memory VMCS at all -- something more fundamental is broken (TSC scaling
-+ * mode, CPU caching of VMCS fields, etc.).
++ * Earlier versions:
++ *   v1: in-handler measured cost (covered ~5-15k with cpuidmon active).
++ *   v3: hvm_do_resume() hook (only fired on scheduler resume; once
++ *       cpuidmon was dropped this never ran).
++ *   v4: in-handler measured cost again (without cpuidmon -- in-handler
++ *       window was too small to overcome al-khaser's threshold).
++ *   v5/v6: forced 1M-cycle subtraction. Decisively proved the offset
++ *       write reaches the live VMCS -- guest hung on rdtsc-bench's 4096
++ *       iterations from cumulative ~2 seconds of TSC backwards.
++ *   v7: fixed-amount subtraction tuned for al-khaser's (0, 1000) window.
 + */
-+#define TC_VMEXIT_FORCED_CYCLES     1000000ULL
++#define TC_VMEXIT_SUBTRACT_CYCLES   1500ULL
 +
 +static DEFINE_PER_CPU(uint64_t, tc_vmexit_compensated_cycles);
 +
  void asmlinkage vmx_vmexit_handler(struct cpu_user_regs *regs)
  {
      unsigned long exit_qualification, exit_reason, idtv_info, intr_info = 0;
-@@ -4747,6 +4776,22 @@ void asmlinkage vmx_vmexit_handler(struct cpu_user_regs *regs)
+@@ -4747,6 +4779,23 @@ void asmlinkage vmx_vmexit_handler(struct cpu_user_regs *regs)
          break;
      }
  
 +    /*
-+     * MAP-1793 v5: forced TSC offset shift on every CPUID exit.
-+     * Subtract a fixed 1M cycles directly via __vmwrite(TSC_OFFSET) and
-+     * also update the cached value so future hvm_get_guest_tsc() agrees.
-+     * If guest RDTSC after CPUID still reads ~2k cycles forward, the
-+     * offset write isn't reaching the live VMCS.
++     * MAP-1793 v7: hide a fixed slice of every CPUID exit from the guest
++     * TSC. Using __vmwrite directly (not hvm_set_tsc_offset) keeps the
++     * write in the same VMCS context we're already in and avoids the
++     * indirect dispatch. cache_tsc_offset is updated so subsequent calls
++     * to hvm_get_guest_tsc()/hvm_set_tsc_offset() agree.
 +     */
 +    if ( (uint16_t)exit_reason == EXIT_REASON_CPUID )
 +    {
-+        uint64_t new_offset = v->arch.hvm.cache_tsc_offset - TC_VMEXIT_FORCED_CYCLES;
++        uint64_t new_offset = v->arch.hvm.cache_tsc_offset
++                              - TC_VMEXIT_SUBTRACT_CYCLES;
 +
 +        v->arch.hvm.cache_tsc_offset = new_offset;
 +        __vmwrite(TSC_OFFSET, new_offset);
-+        this_cpu(tc_vmexit_compensated_cycles) += TC_VMEXIT_FORCED_CYCLES;
++        this_cpu(tc_vmexit_compensated_cycles) += TC_VMEXIT_SUBTRACT_CYCLES;
 +    }
 +
  out:
