@@ -1,0 +1,259 @@
+# 0004-hvmloader-extra-smbios-types.patch
+#
+# MAP-1822: synthesize SMBIOS hardware sensor structures (types 7/8/9/26/27/28)
+# in Xen's HVM guests so WMI-based al-khaser GEN_SANDBOX checks find populated
+# Win32_CacheMemory / Win32_PortConnector / CIM_Slot / Win32_VoltageProbe /
+# Win32_Fan / Win32_TemperatureProbe instances.
+#
+# Failing al-khaser checks before this patch (sandbox-side run, post MAP-1793
+# Xen patches; verified 2026-05-01):
+#   "Cache Information"          -> 1 (DETECTED)
+#   "Port Connector Information" -> 1 (DETECTED)
+#   "System Slot Information"    -> 1 (DETECTED)
+#   "Voltage Probe"              -> 1 (DETECTED)
+#   "Cooling Device"             -> 1 (DETECTED)
+#   "Temperature Probe"          -> 1 (DETECTED)
+#
+# Approach: extend hvmloader's write_smbios_tables() to emit six new structure
+# types, each backed by *passthrough only* from the smbios_firmware blob (the
+# domain config 'smbios_firmware="..."' option). The actual table content is
+# generated outside Xen by ansible/build/xen/gen-smbios-firmware.py with values
+# matching our existing Dell OptiPlex 7080 SMBIOS spoof, and loaded by libxl
+# into guest memory before hvmloader runs. Keeping the data outside Xen avoids
+# having to bake hardware values into the hypervisor source.
+#
+# When a type is absent from the blob, the init function returns the start
+# pointer unchanged; the do_struct() macro in write_smbios_tables() sees no
+# advance and skips counting the table, so guests without the firmware blob
+# (e.g. dev VMs that haven't been re-templated yet) keep their existing SMBIOS
+# layout. This makes the patch backwards-compatible.
+#
+# Acceptance: all six al-khaser checks above return -> 0 with the firmware
+# blob loaded. Existing GEN_SANDBOX checks (Manufacturer / Model /
+# SerialNumber / time accelerated / VM Driver Services etc.) unaffected.
+#
+# Patch series ordering note: 0001 (ACPI anti-evasion) and 0003 (CPUID
+# stealth) are still applied; 0002 (RDTSC compensation) was dropped.
+#
+diff --git a/tools/firmware/hvmloader/smbios.c b/tools/firmware/hvmloader/smbios.c
+index 97a054e..eb1b9f6 100644
+--- a/tools/firmware/hvmloader/smbios.c
++++ b/tools/firmware/hvmloader/smbios.c
+@@ -33,12 +33,18 @@
+ #define SMBIOS_HANDLE_TYPE2   0x0200
+ #define SMBIOS_HANDLE_TYPE3   0x0300
+ #define SMBIOS_HANDLE_TYPE4   0x0400
++#define SMBIOS_HANDLE_TYPE7   0x0700
++#define SMBIOS_HANDLE_TYPE8   0x0800
++#define SMBIOS_HANDLE_TYPE9   0x0900
+ #define SMBIOS_HANDLE_TYPE11  0x0B00
+ #define SMBIOS_HANDLE_TYPE16  0x1000
+ #define SMBIOS_HANDLE_TYPE17  0x1100
+ #define SMBIOS_HANDLE_TYPE19  0x1300
+ #define SMBIOS_HANDLE_TYPE20  0x1400
+ #define SMBIOS_HANDLE_TYPE22  0x1600
++#define SMBIOS_HANDLE_TYPE26  0x1A00
++#define SMBIOS_HANDLE_TYPE27  0x1B00
++#define SMBIOS_HANDLE_TYPE28  0x1C00
+ #define SMBIOS_HANDLE_TYPE32  0x2000
+ #define SMBIOS_HANDLE_TYPE39  0x2700
+ #define SMBIOS_HANDLE_TYPE127 0x7f00
+@@ -77,6 +83,12 @@ static void *
+ smbios_type_4_init(void *start, unsigned int cpu_number,
+                    char *cpu_manufacturer);
+ static void *
++smbios_type_7_init(void *start);
++static void *
++smbios_type_8_init(void *start);
++static void *
++smbios_type_9_init(void *start);
++static void *
+ smbios_type_11_init(void *start);
+ static void *
+ smbios_type_16_init(void *start, uint32_t memory_size_mb, int nr_mem_devs);
+@@ -89,6 +101,12 @@ smbios_type_20_init(void *start, uint32_t memory_size_mb, int instance);
+ static void *
+ smbios_type_22_init(void *start);
+ static void *
++smbios_type_26_init(void *start);
++static void *
++smbios_type_27_init(void *start);
++static void *
++smbios_type_28_init(void *start);
++static void *
+ smbios_type_32_init(void *start);
+ static void *
+ smbios_type_39_init(void *start);
+@@ -205,6 +223,9 @@ write_smbios_tables(void *ep, void *start,
+     do_struct(smbios_type_3_init(p));
+     for ( cpu_num = 1; cpu_num <= vcpus; cpu_num++ )
+         do_struct(smbios_type_4_init(p, cpu_num, cpu_manufacturer));
++    do_struct(smbios_type_7_init(p));
++    do_struct(smbios_type_8_init(p));
++    do_struct(smbios_type_9_init(p));
+     do_struct(smbios_type_11_init(p));
+ 
+     /* Each 'memory device' covers up to 16GB of address space. */
+@@ -221,6 +242,9 @@ write_smbios_tables(void *ep, void *start,
+     }
+ 
+     do_struct(smbios_type_22_init(p));
++    do_struct(smbios_type_26_init(p));
++    do_struct(smbios_type_27_init(p));
++    do_struct(smbios_type_28_init(p));
+     do_struct(smbios_type_32_init(p));
+     do_struct(smbios_type_39_init(p));
+     do_struct(smbios_type_vendor_oem_init(p));
+@@ -700,6 +724,74 @@ smbios_type_4_init(
+     return start+1;
+ }
+ 
++/* Type 7 -- Cache Information.
++ * Passthrough-only: emitted only when present in the smbios_firmware blob.
++ * Backs Win32_CacheMemory; required to defeat al-khaser GEN_SANDBOX
++ * "Cache Information" check (MAP-1822).
++ */
++static void *
++smbios_type_7_init(void *start)
++{
++    struct smbios_structure_header *p = (struct smbios_structure_header *)start;
++    void *pts;
++    uint32_t length;
++
++    pts = get_smbios_pt_struct(7, &length);
++    if ( (pts != NULL) && (length > 0) )
++    {
++        memcpy(start, pts, length);
++        p->handle = SMBIOS_HANDLE_TYPE7;
++        return (start + length);
++    }
++
++    /* Only present when passed in */
++    return start;
++}
++
++/* Type 8 -- Port Connector Information.
++ * Passthrough-only. Backs Win32_PortConnector; defeats al-khaser
++ * "Port Connector Information" GEN_SANDBOX check (MAP-1822).
++ */
++static void *
++smbios_type_8_init(void *start)
++{
++    struct smbios_structure_header *p = (struct smbios_structure_header *)start;
++    void *pts;
++    uint32_t length;
++
++    pts = get_smbios_pt_struct(8, &length);
++    if ( (pts != NULL) && (length > 0) )
++    {
++        memcpy(start, pts, length);
++        p->handle = SMBIOS_HANDLE_TYPE8;
++        return (start + length);
++    }
++
++    return start;
++}
++
++/* Type 9 -- System Slots.
++ * Passthrough-only. Backs CIM_Slot; defeats al-khaser
++ * "System Slot Information" GEN_SANDBOX check (MAP-1822).
++ */
++static void *
++smbios_type_9_init(void *start)
++{
++    struct smbios_structure_header *p = (struct smbios_structure_header *)start;
++    void *pts;
++    uint32_t length;
++
++    pts = get_smbios_pt_struct(9, &length);
++    if ( (pts != NULL) && (length > 0) )
++    {
++        memcpy(start, pts, length);
++        p->handle = SMBIOS_HANDLE_TYPE9;
++        return (start + length);
++    }
++
++    return start;
++}
++
+ /* Type 11 -- OEM Strings */
+ static void *
+ smbios_type_11_init(void *start) 
+@@ -923,6 +1015,77 @@ smbios_type_22_init(void *start)
+     return start+1; 
+ }
+ 
++/* Type 26 -- Voltage Probe.
++ * Passthrough-only. Backs Win32_VoltageProbe; defeats al-khaser
++ * "Voltage Probe" GEN_SANDBOX check (MAP-1822).
++ */
++static void *
++smbios_type_26_init(void *start)
++{
++    struct smbios_structure_header *p = (struct smbios_structure_header *)start;
++    void *pts;
++    uint32_t length;
++
++    pts = get_smbios_pt_struct(26, &length);
++    if ( (pts != NULL) && (length > 0) )
++    {
++        memcpy(start, pts, length);
++        p->handle = SMBIOS_HANDLE_TYPE26;
++        return (start + length);
++    }
++
++    return start;
++}
++
++/* Type 27 -- Cooling Device.
++ * Passthrough-only. Backs Win32_Fan; defeats al-khaser
++ * "Cooling Device" GEN_SANDBOX check (MAP-1822).
++ *
++ * The structure may reference a Type 28 (Temperature Probe) by handle, so
++ * the firmware blob should emit Type 28 before Type 27 (gen-smbios-firmware.py
++ * does this; SMBIOS forward-handle references are otherwise legal but more
++ * fragile across consumers).
++ */
++static void *
++smbios_type_27_init(void *start)
++{
++    struct smbios_structure_header *p = (struct smbios_structure_header *)start;
++    void *pts;
++    uint32_t length;
++
++    pts = get_smbios_pt_struct(27, &length);
++    if ( (pts != NULL) && (length > 0) )
++    {
++        memcpy(start, pts, length);
++        p->handle = SMBIOS_HANDLE_TYPE27;
++        return (start + length);
++    }
++
++    return start;
++}
++
++/* Type 28 -- Temperature Probe.
++ * Passthrough-only. Backs Win32_TemperatureProbe; defeats al-khaser
++ * "Temperature Probe" GEN_SANDBOX check (MAP-1822).
++ */
++static void *
++smbios_type_28_init(void *start)
++{
++    struct smbios_structure_header *p = (struct smbios_structure_header *)start;
++    void *pts;
++    uint32_t length;
++
++    pts = get_smbios_pt_struct(28, &length);
++    if ( (pts != NULL) && (length > 0) )
++    {
++        memcpy(start, pts, length);
++        p->handle = SMBIOS_HANDLE_TYPE28;
++        return (start + length);
++    }
++
++    return start;
++}
++
+ /* Type 32 -- System Boot Information */
+ static void *
+ smbios_type_32_init(void *start)
