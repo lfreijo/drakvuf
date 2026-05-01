@@ -843,7 +843,8 @@ static event_response_t hidevm_open_key_entry(hidevm* plugin, drakvuf_t drakvuf,
 // case-insensitive substring search no longer matches.
 // ---------------------------------------------------------------------------
 
-static const char* HIDEVM_BANNED_SUBKEY_FRAGMENTS[] = {
+static const char* HIDEVM_BANNED_SUBKEY_FRAGMENTS[] =
+{
     "ven_5853",  // Xen Platform PCI device
     "qemu",
     "virtio",
@@ -944,7 +945,10 @@ event_response_t hidevm::EnumerateKeyReturn_cb(drakvuf_t, drakvuf_trap_info_t* i
 
     // Always clean up the per-call hook entry on the way out, regardless of
     // syscall outcome.
-    auto cleanup = [this, &hook_ID]() { this->enum_key_ret_hooks.erase(hook_ID); };
+    auto cleanup = [this, &hook_ID]()
+    {
+        this->enum_key_ret_hooks.erase(hook_ID);
+    };
 
     if (!this->enum_key_ret_hooks.count(hook_ID) || !params->verifyResultCallParams(drakvuf, info))
     {
@@ -1000,7 +1004,7 @@ event_response_t hidevm::EnumerateKeyReturn_cb(drakvuf_t, drakvuf_trap_info_t* i
     }
 
     const char* matched = hidevm_subkey_buffer_munge(drakvuf, info,
-        params->key_information + name_offset_in_buf, name_length_bytes);
+            params->key_information + name_offset_in_buf, name_length_bytes);
 
     if (matched)
     {
