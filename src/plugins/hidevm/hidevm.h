@@ -114,6 +114,23 @@ struct hidevm_config
     uint64_t delay;
 };
 
+// State carried from NtEnumerateKey entry to its return hook so the return
+// callback can mutate the output buffer the kernel just populated.
+struct hidevm_enum_key_data : PluginResult
+{
+    hidevm_enum_key_data()
+        : PluginResult()
+        , info_class(0)
+        , key_information(0)
+        , length(0)
+    {
+    }
+
+    uint32_t info_class;
+    addr_t   key_information;
+    uint32_t length;
+};
+
 class hidevm: public pluginex
 {
 public:
@@ -127,6 +144,9 @@ public:
     event_response_t NtOpenKeyTransacted_cb(drakvuf_t, drakvuf_trap_info*);
     event_response_t NtOpenKeyTransactedEx_cb(drakvuf_t, drakvuf_trap_info*);
     event_response_t HideKeyReturn_cb(drakvuf_t, drakvuf_trap_info*);
+
+    event_response_t NtEnumerateKey_cb(drakvuf_t, drakvuf_trap_info*);
+    event_response_t EnumerateKeyReturn_cb(drakvuf_t, drakvuf_trap_info*);
 
     drakvuf_t drakvuf;
     const output_format_t format;
@@ -144,6 +164,9 @@ public:
     std::unique_ptr<libhook::SyscallHook> NtOpenKeyTransacted_hook;
     std::unique_ptr<libhook::SyscallHook> NtOpenKeyTransactedEx_hook;
     std::map<std::pair<uint64_t, addr_t>, std::unique_ptr<libhook::ReturnHook>> hide_key_ret_hooks;
+
+    std::unique_ptr<libhook::SyscallHook> NtEnumerateKey_hook;
+    std::map<std::pair<uint64_t, addr_t>, std::unique_ptr<libhook::ReturnHook>> enum_key_ret_hooks;
 
     addr_t objattr_length;
     addr_t objattr_name;
