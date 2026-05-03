@@ -18,6 +18,7 @@ RUN cd /build-xen && \
     ./configure-xen.sh && \
     echo "Applying anti-evasion patches..." && \
     for p in /build-patches/*.patch; do \
+        [ -f "$p" ] || continue; \
         echo "  applying $p"; \
         patch -p1 -t < "$p" || exit 1; \
     done && \
